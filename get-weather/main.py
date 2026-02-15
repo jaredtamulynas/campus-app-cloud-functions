@@ -136,6 +136,7 @@ def get_weather(cloud_event):
                 "rate": float(readings.get("Rain Rate", "0.00")),
                 "total": float(readings.get("Rain Gauge", "0.00")),
             },
+            "solarRadiation": int(readings.get("Solar Radiation Sensor", 0)),
             "sunrise": sunrise,
             "sunset": sunset,
             "lastUpdated": timestamp_str,
