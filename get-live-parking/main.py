@@ -57,24 +57,20 @@ def lot_key_from_name(name):
 
 def build_lot_data(lot, current_data, key):
     """Build the update dict for a single parking lot."""
-    data = {
+    return {
         "id": key,
         "name": lot.get("location_name", ""),
-        "location": {
-            "address": lot.get("location_address", "") or None,
-            "coordinate": parse_coordinate(lot.get("geocode", "")),
-        },
+        "address": lot.get("location_address", "") or None,
+        "coordinate": parse_coordinate(lot.get("geocode", "")),
         "totalSpaces": parse_int(lot.get("total_spaces")),
         "availableSpaces": parse_int(lot.get("free_spaces")),
         "occupancy": parse_int(lot.get("occupancy")),
         "isHidden": current_data.get("isHidden", False),
     }
 
-    return data
 
-
-@functions_framework.cloud_event
-def get_live_parking(cloud_event):
+@functions_framework.http
+def get_live_parking(request):
     try:
         response = fetch_parking_data()
         logging.info(f"OpenSpace response type: {type(response).__name__}")
@@ -84,18 +80,17 @@ def get_live_parking(cloud_event):
             parking_lots = response[0] if isinstance(response[0], list) else response
         else:
             logging.error(f"Unexpected response format: {json.dumps(response)[:500]}")
-            return
+            return (json.dumps({"status": "error", "message": "Unexpected response format"}), 500, {"Content-Type": "application/json"})
 
         if not parking_lots:
             logging.info("No parking lots returned from API.")
-            return
+            return (json.dumps({"status": "ok", "message": "No parking lots returned"}), 200, {"Content-Type": "application/json"})
 
         ref = firebase_db.reference("liveParking")
-        lots_ref = ref.child("lots")
-        current_lots = lots_ref.get() or {}
-        current_lot_keys = set(current_lots.keys())
-        updated_lot_keys = set()
+        current_lots = ref.child("lots").get() or {}
 
+        # Build all lot data in one pass
+        updated_lots = {}
         for lot in parking_lots:
             name = lot.get("location_name")
             if not name:
@@ -103,23 +98,27 @@ def get_live_parking(cloud_event):
                 continue
 
             key = lot_key_from_name(name)
-            updated_lot_keys.add(key)
-
             current_data = current_lots.get(key, {})
-            lot_data = build_lot_data(lot, current_data, key)
-            lots_ref.child(key).update(lot_data)
+            updated_lots[key] = build_lot_data(lot, current_data, key)
 
-        # Remove lots no longer returned by the API
-        obsolete_keys = current_lot_keys - updated_lot_keys
-        for key in obsolete_keys:
-            lots_ref.child(key).delete()
-            logging.info(f"Removed obsolete lot: {key}")
+        # Single atomic write replaces all lots and removes obsolete ones
+        last_updated = datetime.now(EASTERN).strftime("%Y-%m-%d %I:%M:%S %p")
+        ref.set({
+            "lots": updated_lots,
+            "lastUpdated": last_updated,
+        })
 
-        # Update timestamp at the top level
-        timestamp_str = datetime.now(EASTERN).strftime("%Y-%m-%d %I:%M:%S %p")
-        ref.child("lastUpdated").set(timestamp_str)
+        logging.info(f"Parking updated: {len(updated_lots)} lots")
+        return (json.dumps({"status": "ok", "lots": len(updated_lots)}), 200, {"Content-Type": "application/json"})
 
-        logging.info(f"Parking updated: {len(updated_lot_keys)} lots, {len(obsolete_keys)} removed")
+    except requests.exceptions.Timeout:
+        logging.error("OpenSpace API timed out")
+        return (json.dumps({"status": "error", "message": "OpenSpace API timeout"}), 500, {"Content-Type": "application/json"})
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"OpenSpace API request failed: {e}")
+        return (json.dumps({"status": "error", "message": str(e)}), 500, {"Content-Type": "application/json"})
 
     except Exception as e:
         logging.error(f"Unhandled error in get_live_parking: {e}")
+        return (json.dumps({"status": "error", "message": str(e)}), 500, {"Content-Type": "application/json"})

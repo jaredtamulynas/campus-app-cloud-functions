@@ -1,0 +1,7 @@
+functions-framework==3.*
+firebase-admin==5.*
+requests==2.*
+google-cloud-logging==3.*
+google-cloud-firestore
+polyline==2.*
+beautifulsoup4==4.*

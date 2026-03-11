@@ -1,0 +1,5 @@
+functions-framework==3.*
+firebase-admin==6.*
+google-cloud-logging==3.*
+google-api-python-client==2.*
+google-auth==2.*

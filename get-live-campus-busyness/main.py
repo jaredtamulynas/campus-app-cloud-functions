@@ -1,6 +1,7 @@
 import functions_framework
 import json
 import logging
+import time
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -75,27 +76,28 @@ def build_location(location):
     }
 
 
-@functions_framework.cloud_event
-def get_live_campus_busyness(cloud_event):
+@functions_framework.http
+def get_live_campus_busyness(request):
+    start_total = time.time()
     try:
+        # --- Fetch ---
+        start = time.time()
         data = fetch_waitz_data()
-        logging.info(f"Waitz response type: {type(data).__name__}")
+        logging.info(f"Waitz API: {time.time() - start:.2f}s — type: {type(data).__name__}")
 
-        # Extract locations from the response
+        # --- Parse ---
+        start = time.time()
         if isinstance(data, dict):
             locations = data.get("data", [])
         elif isinstance(data, list):
             locations = data
         else:
             logging.error(f"Unexpected response format: {json.dumps(data)[:500]}")
-            return
+            return (json.dumps({"status": "error", "message": "Unexpected response format"}), 500, {"Content-Type": "application/json"})
 
         if not locations:
             logging.info("No locations returned from Waitz.")
-            return
-
-        ref = firebase_db.reference("liveCampusBusyness")
-        locations_ref = ref.child("locations")
+            return (json.dumps({"status": "ok", "message": "No locations returned"}), 200, {"Content-Type": "application/json"})
 
         location_updates = {}
         for location in locations:
@@ -103,17 +105,33 @@ def get_live_campus_busyness(cloud_event):
             if not loc_id:
                 logging.warning(f"Skipping location with no id: {location.get('name')}")
                 continue
-
             location_updates[str(loc_id)] = build_location(location)
 
-        # Write all locations at once
-        locations_ref.set(location_updates)
+        logging.info(f"Parse: {time.time() - start:.2f}s — {len(location_updates)} locations")
 
-        # Update timestamp
-        timestamp_str = datetime.now(EASTERN).strftime("%Y-%m-%d %I:%M:%S %p")
-        ref.child("lastUpdated").set(timestamp_str)
+        # --- Write locations ---
+        start = time.time()
+        ref = firebase_db.reference("liveCampusBusyness")
+        ref.child("locations").set(location_updates)
+        logging.info(f"Firebase write locations: {time.time() - start:.2f}s")
 
-        logging.info(f"Busyness updated: {len(location_updates)} locations")
+        # --- Write lastUpdated ---
+        start = time.time()
+        last_updated = datetime.now(EASTERN).strftime("%Y-%m-%d %I:%M:%S %p")
+        ref.child("lastUpdated").set(last_updated)
+        logging.info(f"Firebase write lastUpdated: {time.time() - start:.2f}s")
+
+        logging.info(f"Total: {time.time() - start_total:.2f}s — {len(location_updates)} locations updated")
+        return (json.dumps({"status": "ok", "locations": len(location_updates)}), 200, {"Content-Type": "application/json"})
+
+    except requests.exceptions.Timeout:
+        logging.error(f"Waitz API timed out after {time.time() - start_total:.2f}s")
+        return (json.dumps({"status": "error", "message": "Waitz API timeout"}), 500, {"Content-Type": "application/json"})
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Waitz API request failed after {time.time() - start_total:.2f}s: {e}")
+        return (json.dumps({"status": "error", "message": str(e)}), 500, {"Content-Type": "application/json"})
 
     except Exception as e:
-        logging.error(f"Unhandled error in get_live_campus_busyness: {e}")
+        logging.error(f"Unhandled error after {time.time() - start_total:.2f}s: {e}")
+        return (json.dumps({"status": "error", "message": str(e)}), 500, {"Content-Type": "application/json"})
